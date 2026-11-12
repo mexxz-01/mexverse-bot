@@ -23,6 +23,46 @@ const {
 } = require('discord.js');
 const { REST } = require('@discordjs/rest');
 const http = require('http');
+const net = require('net');
+
+function sendMinecraftRcon(cmd) {
+  return new Promise((resolve) => {
+    const client = net.createConnection({ port: 25575, host: '127.0.0.1' });
+    let reqId = 1;
+    let authed = false;
+
+    function sendPacket(id, type, body) {
+      const bodyBuf = Buffer.from(body, 'utf8');
+      const len = 4 + 4 + bodyBuf.length + 2;
+      const buf = Buffer.alloc(4 + len);
+      buf.writeInt32LE(len, 0);
+      buf.writeInt32LE(id, 4);
+      buf.writeInt32LE(type, 8);
+      bodyBuf.copy(buf, 12);
+      buf.writeInt16LE(0, 12 + bodyBuf.length);
+      client.write(buf);
+    }
+
+    client.on('connect', () => {
+      sendPacket(reqId++, 3, 'mexverseAdmin2026');
+    });
+
+    client.on('data', data => {
+      if (!authed) {
+        authed = true;
+        sendPacket(reqId++, 2, cmd);
+      } else {
+        const str = data.slice(12, data.length - 2).toString('utf8');
+        client.end();
+        resolve(str);
+      }
+    });
+
+    client.on('error', err => resolve('[RCON ERROR: ' + err.message + ']'));
+    setTimeout(() => { client.destroy(); resolve('[RCON TIMEOUT]'); }, 4000);
+  });
+}
+
 const db = require('./db');
 
 try {
@@ -241,6 +281,41 @@ const commands = [
     .addStringOption(opt => opt.setName('player').setDescription('Player name').setRequired(true))
     .addStringOption(opt => opt.setName('details').setDescription('Extra details or funny death message'))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages),
+
+  // --- ADMIN CRATE KEYS MANAGEMENT ---
+  new SlashCommandBuilder()
+    .setName('give-crate-key')
+    .setDescription('🔑 [ADMIN ONLY] Grant in-game mystery crate keys to a player or everyone')
+    .addStringOption(opt =>
+      opt.setName('crate')
+        .setDescription('Select crate type')
+        .setRequired(true)
+        .addChoices(
+          { name: '🔥 Prime Crate (Legendary / God Tier)', value: 'prime_crate' },
+          { name: '🩸 Crimson Crate (Mythic Tier)', value: 'crimson_crate' },
+          { name: '💰 Gold Crate (Epic Tier)', value: 'gold_crate' },
+          { name: '🔮 Amethyst Crate (Rare Tier)', value: 'amethyst_crate' },
+          { name: '📦 Common Crate (Starter Tier)', value: 'common_crate' }
+        ))
+    .addIntegerOption(opt =>
+      opt.setName('amount')
+        .setDescription('Number of keys to grant (1 - 64)')
+        .setRequired(false)
+        .setMinValue(1)
+        .setMaxValue(64))
+    .addStringOption(opt =>
+      opt.setName('player')
+        .setDescription('Minecraft Player Gamertag (IGN). Leave empty if using keyall.')
+        .setRequired(false))
+    .addBooleanOption(opt =>
+      opt.setName('keyall')
+        .setDescription('Set true to give keys to EVERY online player on the server!')
+        .setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('crate-list')
+    .setDescription('🎁 View all server mystery crates, tiers, and rewards'),
 
   // --- MODERATION ---
   new SlashCommandBuilder()
@@ -1028,6 +1103,120 @@ function setupBotHandlers(bClient) {
       // ==========================================
       // 🛠️ /fix-issue (STAFF PRIVATE 1-ON-1 ISSUE SESSION)
       // ==========================================
+
+      // ==========================================
+      // 🔑 /give-crate-key (ADMIN & OWNER ONLY)
+      // ==========================================
+      if (commandName === 'give-crate-key') {
+        await interaction.deferReply();
+
+        const isOwner = interaction.user.id === '1551635947660247160';
+        const hasAdmin = interaction.memberPermissions && interaction.memberPermissions.has(PermissionFlagsBits.Administrator);
+        const hasHeadMod = interaction.member && interaction.member.roles.cache.some(r => r.name.toLowerCase().includes('head mod'));
+
+        if (!isOwner && !hasAdmin && !hasHeadMod) {
+          return interaction.editReply({
+            embeds: [
+              new EmbedBuilder()
+                .setTitle('⛔ Access Denied')
+                .setDescription('Only **Server Owner**, **Administrators**, and **🛡️ Head Moderators** can grant in-game crate keys!')
+                .setColor(0xEF4444)
+            ]
+          });
+        }
+
+        const crate = options.getString('crate');
+        const amount = options.getInteger('amount') || 1;
+        const player = options.getString('player');
+        const keyAll = options.getBoolean('keyall') || false;
+
+        if (!keyAll && !player) {
+          return interaction.editReply({
+            embeds: [
+              new EmbedBuilder()
+                .setTitle('⚠️ Missing Target Player')
+                .setDescription('Please specify a Minecraft player gamertag (IGN) or set `keyall: true` to give keys to everyone!')
+                .setColor(0xF59E0B)
+            ]
+          });
+        }
+
+        let rconCmd = '';
+        let targetText = '';
+        if (keyAll) {
+          rconCmd = `crate keyall ${crate} ${amount}`;
+          targetText = '🌟 **ALL ONLINE PLAYERS** (Server-Wide Key Drop!)';
+        } else {
+          rconCmd = `crate give ${player} ${crate} ${amount}`;
+          targetText = `🎮 Player: **${player}**`;
+        }
+
+        const rawResult = await sendMinecraftRcon(rconCmd);
+        const cleanResult = (rawResult || '').replace(/§[0-9a-fk-or]/gi, '').trim();
+
+        const crateMeta = {
+          'prime_crate': { name: '🔥 Prime Crate Key', color: 0xFF4500, tier: 'God / Legendary Tier' },
+          'crimson_crate': { name: '🩸 Crimson Crate Key', color: 0xDC2626, tier: 'Mythic Tier' },
+          'gold_crate': { name: '💰 Gold Crate Key', color: 0xFBBF24, tier: 'Epic Tier' },
+          'amethyst_crate': { name: '🔮 Amethyst Crate Key', color: 0xA855F7, tier: 'Rare Tier' },
+          'common_crate': { name: '📦 Common Crate Key', color: 0x10B981, tier: 'Starter Tier' }
+        }[crate] || { name: `${crate} Key`, color: 0x0284C7, tier: 'Special' };
+
+        const receiptEmbed = new EmbedBuilder()
+          .setTitle('🔑 CRATE KEYS GRANTED SUCCESSFULLY!')
+          .setColor(crateMeta.color)
+          .setThumbnail('https://mc-heads.net/head/MHF_Chest')
+          .setDescription(`Administrator **${interaction.user.tag}** has executed an official in-game crate key grant.`)
+          .addFields(
+            { name: '🎯 Recipient', value: targetText, inline: true },
+            { name: '📦 Crate Type', value: `${crateMeta.name}\n*(${crateMeta.tier})*`, inline: true },
+            { name: '🔢 Amount', value: ```x${amount} Keys```, inline: true },
+            { name: '⚡ Minecraft Console Output', value: ```${cleanResult || 'Executed successfully'}``` },
+            { name: '📍 In-Game Teleport', value: 'Open and spin your keys at **`/warp crates`** in Minecraft!' }
+          )
+          .setFooter({ text: `MEXVERSE SMP Staff Security • Authorized by ${interaction.user.username}`, iconURL: interaction.user.displayAvatarURL() })
+          .setTimestamp();
+
+        await interaction.editReply({ embeds: [receiptEmbed] });
+
+        // Log to #🔒┃staff-logs
+        const staffLogs = guild.channels.cache.find(c => c.name.includes('staff-logs'));
+        if (staffLogs) {
+          await staffLogs.send({ embeds: [receiptEmbed] }).catch(() => {});
+        }
+
+        // Broadcast to announcements or in-game chat if keyall
+        if (keyAll) {
+          const announceChan = guild.channels.cache.find(c => c.name.includes('announcements') || c.name.includes('in-game-chat'));
+          if (announceChan) {
+            await announceChan.send({
+              content: `🎉 @everyone **SERVER-WIDE KEY ALL DROP!**\nAdmin **${interaction.user.tag}** just dropped **x${amount} ${crateMeta.name}** to every online player! Head to /warp crates in-game to claim yours now!`
+            }).catch(() => {});
+          }
+        }
+      }
+
+      // ==========================================
+      // 📦 /crate-list
+      // ==========================================
+      if (commandName === 'crate-list') {
+        const listEmbed = new EmbedBuilder()
+          .setTitle('🎁 MEXVERSE SMP — Official Crates Matrix')
+          .setColor(0x0284C7)
+          .setDescription('Earn or win crate keys in-game and open them at **`/warp crates`** for enchanted armor, weapons, god apples, and rare currency!')
+          .addFields(
+            { name: '🔥 1. Prime Crate (Legendary Tier)', value: 'The pinnacle crate! God sets, max netherite gear, vouchers, flight tokens & rare spawners.', inline: false },
+            { name: '🩸 2. Crimson Crate (Mythic Tier)', value: 'Nether-infused weaponry, high-tier armor enchants, totems & custom boss relics.', inline: false },
+            { name: '💰 3. Gold Crate (Epic Tier)', value: 'Diamonds, emerald blocks, mid-tier PvP gear, experience bottles & golden apples.', inline: false },
+            { name: '🔮 4. Amethyst Crate (Rare Tier)', value: 'Utility tools, potion stacks, construction supplies & claim block tokens.', inline: false },
+            { name: '📦 5. Common Crate (Starter Tier)', value: 'Starter tools, iron ingots, food packs & daily survival boosters.', inline: false }
+          )
+          .setFooter({ text: 'MEXVERSE SMP • Type /warp crates in Minecraft to open!' })
+          .setTimestamp();
+
+        await interaction.reply({ embeds: [listEmbed] });
+      }
+
       if (commandName === 'fix-issue') {
         const targetMember = options.getUser('member');
         const topic = options.getString('topic') || 'General Issue Resolution';
