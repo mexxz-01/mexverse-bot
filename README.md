@@ -1,5 +1,7 @@
 # ⚔️ MEXVERSE GUARDIAN — Official SMP Discord Bot & Controller System
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/mexxz-01/mexverse-bot)
+
 A high-performance Discord Bot, Real-Time Realm Monitor, Automated UPI Payment Gateway, and Android Companion Controller tailored for the **MEXVERSE SMP** Minecraft community.
 
 ---
