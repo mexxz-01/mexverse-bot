@@ -1,0 +1,25 @@
+{
+  "name": "mexverse-guardian",
+  "version": "1.0.0",
+  "description": "Official Discord Bot, Live Server Monitor & Automated Payment Gateway for MEXVERSE SMP",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "controller": "node control_app/server.js"
+  },
+  "keywords": [
+    "discord-bot",
+    "minecraft",
+    "smp",
+    "mexverse",
+    "upi-payment",
+    "tickets"
+  ],
+  "author": "mexxz-01",
+  "license": "ISC",
+  "dependencies": {
+    "@discordjs/rest": "^2.4.0",
+    "discord.js": "^14.16.3"
+  }
+}

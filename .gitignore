@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Environment Variables & Secrets
+.env
+*.pem
+*.key
+
+# Logs & Temp
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# Android Build Outputs
+android_app/build/
+android_app/bin/
+android_app/obj/
+android_app/*.apk
+android_app/*.idsig
+
+# OS & Editor Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
