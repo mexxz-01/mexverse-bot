@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: mexverse-bot
+    env: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: CLIENT_ID
+        value: 1570434280549519514
+      - key: GUILD_ID
+        value: 1570430997999263895
+      - key: OWNER_ID
+        value: 1551635947660247160
+      - key: UPI_ID
+        value: mexxz@slc
+      - key: NODE_ENV
+        value: production

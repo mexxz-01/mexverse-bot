@@ -22,6 +22,7 @@ const {
   TextInputStyle
 } = require('discord.js');
 const { REST } = require('@discordjs/rest');
+const http = require('http');
 const db = require('./db');
 
 try {
@@ -35,6 +36,46 @@ const CLIENT_ID = process.env.CLIENT_ID || '1570434280549519514';
 const GUILD_ID = process.env.GUILD_ID || '1570430997999263895';
 const IN_GAME_CHAT_CHANNEL_ID = process.env.IN_GAME_CHAT_CHANNEL_ID || '1570435509371670588';
 const UPI_ID = process.env.UPI_ID || 'mexxz@slc';
+
+// Cloud & Render HTTP Health Check Server
+const WEB_PORT = process.env.PORT || (process.env.NODE_ENV === 'production' ? 10000 : null);
+if (WEB_PORT) {
+  const httpServer = http.createServer((req, res) => {
+    if (req.url === '/healthz' || req.url === '/ping') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ status: 'ok', bot: client?.user?.tag || 'online' }));
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>MEXVERSE GUARDIAN</title>
+          <style>
+            body { font-family: -apple-system, sans-serif; background: #0b0f19; color: #f1f5f9; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+            .card { background: #1e293b; padding: 35px 25px; border-radius: 20px; text-align: center; border: 1px solid #334155; max-width: 420px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+            .badge { display: inline-block; background: #10b981; color: #022c22; padding: 6px 14px; border-radius: 99px; font-weight: bold; margin-bottom: 15px; font-size: 13px; }
+            h1 { font-size: 24px; margin-bottom: 8px; }
+            p { color: #94a3b8; font-size: 14px; line-height: 1.5; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="badge">🟢 ONLINE 24/7</div>
+            <h1>MEXVERSE GUARDIAN</h1>
+            <p>Official Discord Bot, Live Server Monitor & Automated Payment Gateway are active on Render.</p>
+          </div>
+        </body>
+      </html>
+    `);
+  });
+
+  httpServer.listen(WEB_PORT, '0.0.0.0', () => {
+    console.log(`[HTTP] Render health check server listening on port ${WEB_PORT}`);
+  }).on('error', (err) => {
+    console.warn(`[HTTP] Health check server port warning: ${err.message}`);
+  });
+}
 
 const JAVA_IP = 'impairment-telling.tun.ply.gg:65482';
 const DISPLAY_JAVA_IP = 'mexverse.qd.je';
