@@ -38,6 +38,8 @@ let economy = loadData('economy', {});
 let linked = loadData('linked', {});
 let tickets = loadData('tickets', { open: {}, counter: 0 });
 let starboard = loadData('starboard', {});
+let bounties = loadData('bounties', {});
+let playtime = loadData('playtime', {});
 let serverConfig = loadData('config', { statusMessageId: null, statusChannelId: null, voiceChannelId: null });
 
 module.exports = {
@@ -93,6 +95,22 @@ module.exports = {
   },
   saveStarboard() {
     saveData('starboard', starboard);
+  },
+
+  // Bounties
+  getBounties() {
+    return bounties;
+  },
+  saveBounties() {
+    saveData('bounties', bounties);
+  },
+
+  // Playtime
+  getPlaytime() {
+    return playtime;
+  },
+  savePlaytime() {
+    saveData('playtime', playtime);
   },
 
   // Config

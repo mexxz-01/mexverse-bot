@@ -23,6 +23,8 @@ const {
 } = require('discord.js');
 const { REST } = require('@discordjs/rest');
 const http = require('http');
+const path = require('path');
+const fs = require('fs');
 const net = require('net');
 
 function sendMinecraftRcon(cmd) {
@@ -398,7 +400,81 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('rules')
-    .setDescription('Display MEXVERSE SMP realm rules')
+    .setDescription('Display MEXVERSE SMP realm rules'),
+
+  // --- ⚔️ IN-GAME REALM FEED & PVP BOUNTIES ---
+  new SlashCommandBuilder()
+    .setName('bounty')
+    .setDescription('🎯 Place a MexCoin bounty on an in-game player')
+    .addStringOption(opt =>
+      opt.setName('player')
+        .setDescription('Minecraft IGN of the target player')
+        .setRequired(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('coins')
+        .setDescription('Amount of MexCoins to put on their head (min: 50)')
+        .setRequired(true)
+        .setMinValue(50)
+        .setMaxValue(100000)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('bounties')
+    .setDescription('📜 View all active wanted player bounties in the realm'),
+
+  new SlashCommandBuilder()
+    .setName('playtime')
+    .setDescription('⏱️ Check in-game playtime hours and rank milestone progress')
+    .addStringOption(opt =>
+      opt.setName('username')
+        .setDescription('Minecraft username (leave empty for linked account)')
+        .setRequired(false)
+    ),
+
+  // --- 💳 SMART UPI PURCHASE VERIFICATION ---
+  new SlashCommandBuilder()
+    .setName('redeem-purchase')
+    .setDescription('💳 Submit your UPI transaction ID / UTR for instant rank activation'),
+
+  // --- TREASURY & PEER COIN TRANSFER ---
+  new SlashCommandBuilder()
+    .setName('give-coins')
+    .setDescription('🏛️ [ADMIN] Grant MexCoins from the treasury to a member')
+    .addUserOption(opt =>
+      opt.setName('user')
+        .setDescription('Target member')
+        .setRequired(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('amount')
+        .setDescription('Amount of MexCoins to grant')
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(1000000)
+    )
+    .addStringOption(opt =>
+      opt.setName('reason')
+        .setDescription('Reason for granting coins')
+        .setRequired(false)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('pay')
+    .setDescription('💸 Transfer MexCoins to another server member')
+    .addUserOption(opt =>
+      opt.setName('user')
+        .setDescription('Member to receive the coins')
+        .setRequired(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('amount')
+        .setDescription('Amount of MexCoins to transfer')
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(1000000)
+    )
 ].map(cmd => cmd.toJSON());
 
 // Register Slash Commands
@@ -411,6 +487,204 @@ async function registerCommands() {
   } catch (err) {
     console.error('Error registering slash commands:', err);
   }
+}
+
+// ==========================================
+// ⚔️ REALM LOG WATCHER (DEATHS, ADVANCEMENTS, PLAYTIME & BOUNTIES)
+// ==========================================
+const MC_LOG_PATH = path.join('C:', 'smp', 'logs', 'latest.log');
+let logFilePos = 0;
+
+function startRealmLogWatcher(discordClient, guildId) {
+  if (!fs.existsSync(MC_LOG_PATH)) {
+    console.warn('[REALM FEED] Minecraft log not found at:', MC_LOG_PATH);
+  } else {
+    try {
+      const stats = fs.statSync(MC_LOG_PATH);
+      logFilePos = stats.size;
+    } catch (e) {
+      logFilePos = 0;
+    }
+  }
+
+  // 1. Log Watcher for Deaths, Advancements, Bounties
+  setInterval(async () => {
+    try {
+      if (!fs.existsSync(MC_LOG_PATH)) return;
+      const stats = fs.statSync(MC_LOG_PATH);
+      if (stats.size < logFilePos) {
+        logFilePos = 0; // rotated
+      }
+      if (stats.size === logFilePos) return;
+
+      const fd = fs.openSync(MC_LOG_PATH, 'r');
+      const bytesToRead = stats.size - logFilePos;
+      const buffer = Buffer.alloc(bytesToRead);
+      fs.readSync(fd, buffer, 0, bytesToRead, logFilePos);
+      fs.closeSync(fd);
+      logFilePos = stats.size;
+
+      const newContent = buffer.toString('utf8');
+      const lines = newContent.split('\n');
+
+      const guild = discordClient.guilds.cache.get(guildId);
+      if (!guild) return;
+      const feedChan = guild.channels.cache.find(c => c.name.includes('realm-feed'));
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+
+        // A. Advancements & Challenges
+        const advMatch = line.match(/\[Server thread\/INFO\]:\s+([a-zA-Z0-9_.*]+)\s+has\s+(made the advancement|completed the challenge|reached the goal)\s+\[(.+?)\]/);
+        if (advMatch && feedChan) {
+          const player = advMatch[1];
+          const type = advMatch[2];
+          const advName = advMatch[3];
+          const isChallenge = type.includes('challenge');
+          const isGoal = type.includes('goal');
+
+          const advEmbed = new EmbedBuilder()
+            .setTitle(isChallenge ? '🏆 MYTHIC CHALLENGE COMPLETED!' : isGoal ? '🎯 REALM GOAL REACHED!' : '🌟 NEW ADVANCEMENT UNLOCKED!')
+            .setDescription(`**${player}** has successfully unlocked:\n### 🏅 \`[${advName}]\`\n*GG warrior! Keep conquering the MEXVERSE SMP realm.*`)
+            .setThumbnail(`https://mc-heads.net/avatar/${encodeURIComponent(player)}/64`)
+            .setColor(isChallenge ? 0xA855F7 : isGoal ? 0x06B6D4 : 0xF59E0B)
+            .setFooter({ text: 'MEXVERSE SMP • Realm Advancements Feed' })
+            .setTimestamp();
+
+          await feedChan.send({ embeds: [advEmbed] }).catch(() => {});
+        }
+
+        // B. Deaths & PvP Bounties
+        const deathKeywords = [
+          'was slain by', 'was killed by', 'fell from a high place', 'fell out of the world',
+          'hit the ground too hard', 'was blown up by', 'was shot by', 'burned to death',
+          'tried to swim in lava', 'drowned', 'suffocated in a wall', 'starved to death',
+          'was squished too much', 'froze to death', 'was stung to death', 'withered away'
+        ];
+
+        if (line.includes('[Server thread/INFO]: ') && deathKeywords.some(k => line.includes(k))) {
+          const content = line.substring(line.indexOf('[Server thread/INFO]: ') + 22).trim();
+          if (!content.includes(':') && !content.startsWith('[') && !content.startsWith('Issued server command')) {
+            const victim = content.split(' ')[0];
+            let killer = null;
+            const pvpMatch = content.match(/([a-zA-Z0-9_.*]+)\s+(?:was slain by|was shot by|was killed by)\s+([a-zA-Z0-9_.*]+)/);
+            if (pvpMatch) {
+              killer = pvpMatch[2];
+            }
+
+            const bounties = db.getBounties();
+            const victimKey = victim.toLowerCase();
+            let bountyClaimedText = '';
+
+            if (killer && bounties[victimKey]) {
+              const b = bounties[victimKey];
+              const reward = b.amount;
+              delete bounties[victimKey];
+              db.saveBounties();
+
+              const allLinked = db.getAllLinked();
+              const killerRecord = Object.entries(allLinked).find(([uid, d]) => d.username.toLowerCase() === killer.toLowerCase());
+
+              if (killerRecord) {
+                const killerUid = killerRecord[0];
+                const killerEco = db.getEconomy(killerUid);
+                killerEco.coins += reward;
+                killerEco.xp += 150;
+                db.saveEconomy();
+                bountyClaimedText = `\n\n🎯 **BOUNTY COLLECTED!**\n<@${killerUid}> (\`${killer}\`) eliminated the wanted target and collected the **${reward.toLocaleString()} MexCoins** bounty!`;
+              } else {
+                bountyClaimedText = `\n\n🎯 **BOUNTY TRIGGERED!**\nKiller **${killer}** eliminated the wanted target, but has not linked their Discord! Type \`/link ${killer}\` to sync coins.`;
+              }
+            }
+
+            if (feedChan) {
+              const deathEmbed = new EmbedBuilder()
+                .setTitle('💀 REALM CASUALTY REPORT')
+                .setDescription(`>>> **${content}**${bountyClaimedText}`)
+                .setThumbnail(`https://mc-heads.net/head/${encodeURIComponent(victim)}`)
+                .setColor(bountyClaimedText ? 0xF59E0B : 0xEF4444)
+                .setFooter({ text: 'MEXVERSE SMP • Live Combat & Kill Feed' })
+                .setTimestamp();
+
+              await feedChan.send({ embeds: [deathEmbed] }).catch(() => {});
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[REALM FEED ERROR]', err);
+    }
+  }, 3000);
+
+  // 2. Playtime Tracker & Automatic Milestone Roles (Every 60s)
+  setInterval(async () => {
+    try {
+      const rawList = await sendMinecraftRcon('list');
+      if (rawList && rawList.includes(':')) {
+        const afterColon = rawList.split(':')[1] || '';
+        const onlinePlayers = afterColon.split(',').map(p => p.replace(/§[0-9a-fk-or]/gi, '').trim()).filter(Boolean);
+        if (onlinePlayers.length === 0) return;
+
+        const playtime = db.getPlaytime();
+        const guild = discordClient.guilds.cache.get(guildId);
+        const allLinked = db.getAllLinked();
+
+        for (const p of onlinePlayers) {
+          const pKey = p.toLowerCase();
+          if (!playtime[pKey]) {
+            playtime[pKey] = { seconds: 0, lastSeen: Date.now(), rolesAwarded: [] };
+          }
+          playtime[pKey].seconds += 60;
+          playtime[pKey].lastSeen = Date.now();
+
+          const secs = playtime[pKey].seconds;
+          const awarded = playtime[pKey].rolesAwarded || [];
+
+          const linkedRec = Object.entries(allLinked).find(([uid, d]) => d.username.toLowerCase() === pKey);
+          if (linkedRec && guild) {
+            const member = guild.members.cache.get(linkedRec[0]);
+            if (member) {
+              // 5 hrs = 18000s -> Novice
+              if (secs >= 18000 && !awarded.includes('novice')) {
+                awarded.push('novice');
+                playtime[pKey].rolesAwarded = awarded;
+                const role = guild.roles.cache.find(r => r.name.includes('Novice'));
+                if (role) await member.roles.add(role).catch(() => {});
+                const eco = db.getEconomy(member.id);
+                eco.coins += 250;
+                db.saveEconomy();
+                member.send('🥉 **Congratulations!** You reached **5 Hours** in MEXVERSE SMP and unlocked the **Novice (5h+)** role and **+250 MexCoins**!').catch(() => {});
+              }
+              // 25 hrs = 90000s -> Veteran
+              if (secs >= 90000 && !awarded.includes('veteran')) {
+                awarded.push('veteran');
+                playtime[pKey].rolesAwarded = awarded;
+                const role = guild.roles.cache.find(r => r.name.includes('Veteran'));
+                if (role) await member.roles.add(role).catch(() => {});
+                const eco = db.getEconomy(member.id);
+                eco.coins += 1000;
+                db.saveEconomy();
+                member.send('🥈 **Congratulations!** You reached **25 Hours** in MEXVERSE SMP and unlocked the **Veteran (25h+)** role and **+1,000 MexCoins**!').catch(() => {});
+              }
+              // 100 hrs = 360000s -> No-Life Grinder
+              if (secs >= 360000 && !awarded.includes('grinder')) {
+                awarded.push('grinder');
+                playtime[pKey].rolesAwarded = awarded;
+                const role = guild.roles.cache.find(r => r.name.includes('No-Life Grinder'));
+                if (role) await member.roles.add(role).catch(() => {});
+                const eco = db.getEconomy(member.id);
+                eco.coins += 5000;
+                db.saveEconomy();
+                member.send('🥇 **LEGENDARY!** You reached **100 Hours** in MEXVERSE SMP and unlocked the **No-Life Grinder (100h+)** role and **+5,000 MexCoins**!').catch(() => {});
+              }
+            }
+          }
+        }
+        db.savePlaytime();
+      }
+    } catch (e) {}
+  }, 60000);
 }
 
 // ==========================================
@@ -454,6 +728,7 @@ function setupBotHandlers(bClient) {
     console.log(`[MEXVERSE BOT] Logged in as ${bClient.user.tag}!`);
     bClient.user.setActivity('over MEXVERSE SMP ⚔️', { type: 3 }); // Watching
     registerCommands();
+    startRealmLogWatcher(bClient, GUILD_ID);
 
     // Dynamic Server Status Updater (Every 2 minutes)
     setInterval(async () => {
@@ -836,6 +1111,24 @@ function setupBotHandlers(bClient) {
               uuid: 'Verified Donor',
               linkedAt: Date.now()
             });
+
+            // Automated Minecraft In-Game Rewards via RCON
+            const crateType = rankKey === 'supreme' ? 'crimson_crate' : 'gold_crate';
+            await sendMinecraftRcon(`crate give ${ign} ${crateType} 3`).catch(() => {});
+            await sendMinecraftRcon(`lp user ${ign} parent add ${rankKey === 'supreme' ? 'supreme_vip' : 'vip'}`).catch(() => {});
+          }
+
+          // Bonus MexCoins in Discord Vault
+          const buyerEco = db.getEconomy(buyerId);
+          const bonusCoins = rankKey === 'supreme' ? 3000 : 1500;
+          buyerEco.coins += bonusCoins;
+          db.saveEconomy();
+
+          // Disable buttons on the staff notification card
+          if (interaction.message && interaction.message.components.length > 0) {
+            const disabledRow = ActionRowBuilder.from(interaction.message.components[0]);
+            disabledRow.components.forEach(btn => btn.setDisabled(true));
+            await interaction.message.edit({ components: [disabledRow] }).catch(() => {});
           }
 
           // Notify in the buyer's order channel
@@ -846,8 +1139,10 @@ function setupBotHandlers(bClient) {
               .setDescription(
                 `Awesome news <@${buyerId}>! Server Owner **MEXXZ** has verified your payment!\n\n` +
                 `⭐ **Granted Rank:** **${targetRoleName}**\n` +
-                `🎮 **Minecraft Gamertag:** \`${ign || 'Linked'}\`\n\n` +
-                `Your Discord privileges are now unlocked. Hop onto \`${DISPLAY_JAVA_IP}\` to enjoy your perks!`
+                `🎮 **Minecraft Gamertag:** \`${ign || 'Linked'}\`\n` +
+                `🔑 **In-Game Bonus:** \`x3 ${rankKey === 'supreme' ? 'Crimson' : 'Gold'} Crate Keys\`\n` +
+                `💰 **Discord Bonus:** \`+${bonusCoins.toLocaleString()} MexCoins\`\n\n` +
+                `Your Discord privileges and in-game kits are unlocked. Hop onto \`${DISPLAY_JAVA_IP}\` to enjoy your perks!`
               )
               .setColor(0x00FF88)
               .setThumbnail('https://mc-heads.net/head/MHF_Chest')
@@ -862,13 +1157,13 @@ function setupBotHandlers(bClient) {
           if (logsChan) {
             const auditEmbed = new EmbedBuilder()
               .setTitle('✅ RANK ORDER APPROVED & ACTIVATED')
-              .setDescription(`Owner **MEXXZ** approved **${targetRoleName}** for <@${buyerId}> (\`${ign}\`).`)
+              .setDescription(`Owner **MEXXZ** approved **${targetRoleName}** for <@${buyerId}> (\`${ign}\`). Rewards delivered automatically via RCON & Vault.`)
               .setColor(0x10B981)
               .setTimestamp();
             await logsChan.send({ embeds: [auditEmbed] }).catch(() => {});
           }
 
-          return interaction.editReply({ content: `✅ Successfully approved! **${targetRoleName}** has been granted to <@${buyerId}>.` }).catch(() => {});
+          return interaction.editReply({ content: `✅ Successfully approved! **${targetRoleName}** and in-game crate keys have been granted to <@${buyerId}>.` }).catch(() => {});
         }
 
         // 3. Owner Reject Button
@@ -877,6 +1172,13 @@ function setupBotHandlers(bClient) {
           const parts = customId.split('_');
           const buyerId = parts[2];
           const orderChannelId = parts[3];
+
+          // Disable buttons on the staff notification card
+          if (interaction.message && interaction.message.components.length > 0) {
+            const disabledRow = ActionRowBuilder.from(interaction.message.components[0]);
+            disabledRow.components.forEach(btn => btn.setDisabled(true));
+            await interaction.message.edit({ components: [disabledRow] }).catch(() => {});
+          }
 
           const targetGuild = bClient.guilds.cache.get(GUILD_ID);
           const orderChan = targetGuild?.channels.cache.get(orderChannelId);
@@ -1975,6 +2277,269 @@ function setupBotHandlers(bClient) {
             '5. **Staff Decisions are Final:** Respect decisions made by MEXXZ & Moderators.'
           )
           .setColor(0xEF4444)
+          .setTimestamp();
+
+        return interaction.reply({ embeds: [embed] });
+      }
+
+      // ==========================================
+      // 🎯 /bounty (PLACE BOUNTY ON PLAYER)
+      // ==========================================
+      if (commandName === 'bounty') {
+        const targetPlayer = options.getString('player').trim();
+        const coins = options.getInteger('coins');
+        const eco = db.getEconomy(interaction.user.id);
+
+        if (eco.coins < coins) {
+          return interaction.reply({
+            content: `❌ You do not have enough MexCoins! Your balance is \`${eco.coins.toLocaleString()}\` MexCoins.`,
+            flags: 64
+          });
+        }
+
+        eco.coins -= coins;
+        db.saveEconomy();
+
+        const bounties = db.getBounties();
+        const targetKey = targetPlayer.toLowerCase();
+        if (!bounties[targetKey]) {
+          bounties[targetKey] = {
+            target: targetPlayer,
+            amount: coins,
+            placedBy: interaction.user.id,
+            placedAt: Date.now()
+          };
+        } else {
+          bounties[targetKey].amount += coins;
+        }
+        db.saveBounties();
+
+        const totalBounty = bounties[targetKey].amount;
+
+        const wantedEmbed = new EmbedBuilder()
+          .setTitle('🎯 WANTED DEAD OR ALIVE!')
+          .setDescription(
+            `A high-value PvP bounty has been issued on **${targetPlayer}**!\n\n` +
+            `💰 **Bounty Prize Pool:** \`${totalBounty.toLocaleString()} MexCoins\`\n` +
+            `👤 **Issued By:** <@${interaction.user.id}>\n\n` +
+            `*Slay **${targetPlayer}** in-game to instantly collect the reward!*`
+          )
+          .setThumbnail(`https://mc-heads.net/head/${encodeURIComponent(targetPlayer)}`)
+          .setColor(0xEF4444)
+          .setFooter({ text: 'MEXVERSE SMP • Realm Bounty Board' })
+          .setTimestamp();
+
+        // Broadcast to #⚔️┃realm-feed
+        const feedChan = interaction.guild.channels.cache.find(c => c.name.includes('realm-feed'));
+        if (feedChan) {
+          await feedChan.send({ embeds: [wantedEmbed] }).catch(() => {});
+        }
+
+        return interaction.reply({
+          content: `✅ Bounty of **${coins.toLocaleString()} MexCoins** successfully placed on **${targetPlayer}**! Total Bounty: **${totalBounty.toLocaleString()} MexCoins**. Posted to <#${feedChan ? feedChan.id : interaction.channel.id}>!`
+        });
+      }
+
+      // ==========================================
+      // 📜 /bounties (VIEW ACTIVE BOUNTIES)
+      // ==========================================
+      if (commandName === 'bounties') {
+        const bounties = db.getBounties();
+        const entries = Object.values(bounties);
+
+        if (entries.length === 0) {
+          return interaction.reply({
+            content: '🕊️ There are currently no active bounties on the realm! Type `/bounty <player> <coins>` to place one.',
+            flags: 64
+          });
+        }
+
+        const sorted = entries.sort((a, b) => b.amount - a.amount);
+        const listText = sorted.map((b, idx) => {
+          return `**#${idx + 1}** \`${b.target}\` — 💰 **${b.amount.toLocaleString()} MexCoins** (Put by <@${b.placedBy}>)`;
+        }).join('\n');
+
+        const embed = new EmbedBuilder()
+          .setTitle('🎯 MEXVERSE SMP — Most Wanted Hitlist')
+          .setDescription(`Eliminate these players in PvP combat to collect their bounties:\n\n${listText}`)
+          .setColor(0xF59E0B)
+          .setFooter({ text: 'Use /bounty <player> <coins> to add to the prize pool!' })
+          .setTimestamp();
+
+        return interaction.reply({ embeds: [embed] });
+      }
+
+      // ==========================================
+      // ⏱️ /playtime (IN-GAME TIME & ROLES)
+      // ==========================================
+      if (commandName === 'playtime') {
+        let username = options.getString('username');
+        if (!username) {
+          const linked = db.getLinked(interaction.user.id);
+          if (linked) username = linked.username;
+          else return interaction.reply({ content: 'Please provide a Minecraft username or link your account with `/link <gamertag>`!', flags: 64 });
+        }
+
+        const playtime = db.getPlaytime();
+        const pKey = username.toLowerCase();
+        const pData = playtime[pKey] || { seconds: 0, rolesAwarded: [] };
+
+        const totalHours = (pData.seconds / 3600).toFixed(1);
+        const totalMinutes = Math.floor(pData.seconds / 60);
+
+        let nextRole = '🥉 Novice (5h+)';
+        let targetSecs = 18000;
+        let currentTier = '⚔️ Survivalist (Starting Tier)';
+
+        if (pData.seconds >= 360000) {
+          currentTier = '🥇 No-Life Grinder (100h+)';
+          nextRole = '🏆 Maximum Milestone Reached!';
+          targetSecs = 360000;
+        } else if (pData.seconds >= 90000) {
+          currentTier = '🥈 Veteran (25h+)';
+          nextRole = '🥇 No-Life Grinder (100h+)';
+          targetSecs = 360000;
+        } else if (pData.seconds >= 18000) {
+          currentTier = '🥉 Novice (5h+)';
+          nextRole = '🥈 Veteran (25h+)';
+          targetSecs = 90000;
+        }
+
+        const percent = Math.min(100, Math.floor((pData.seconds / targetSecs) * 100));
+        const filled = Math.floor(percent / 10);
+        const bar = '🟩'.repeat(filled) + '⬜'.repeat(10 - filled);
+
+        const embed = new EmbedBuilder()
+          .setTitle(`⏱️ In-Game Playtime Dossier — ${username}`)
+          .setThumbnail(`https://mc-heads.net/avatar/${encodeURIComponent(username)}/128`)
+          .addFields(
+            { name: '⌛ Total Time Played', value: `**${totalHours} hours** (${totalMinutes.toLocaleString()} minutes)`, inline: true },
+            { name: '🎖️ Current Milestone', value: currentTier, inline: true },
+            { name: `🎯 Next Goal: ${nextRole}`, value: `${bar} **${percent}%**` }
+          )
+          .setColor(0x10B981)
+          .setFooter({ text: 'MEXVERSE SMP • Playtime tracked live every minute' })
+          .setTimestamp();
+
+        return interaction.reply({ embeds: [embed] });
+      }
+
+      // ==========================================
+      // 💳 /redeem-purchase (UPI PURCHASE REDEMPTION DESK)
+      // ==========================================
+      if (commandName === 'redeem-purchase') {
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId('btn_submit_utr_vip')
+            .setLabel('⭐ Redeem VIP (₹29) UTR')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId('btn_submit_utr_supreme')
+            .setLabel('🔥 Redeem Supreme VIP (₹70) UTR')
+            .setStyle(ButtonStyle.Primary)
+        );
+
+        const embed = new EmbedBuilder()
+          .setTitle('💳 Smart UPI Purchase Verification Desk')
+          .setDescription(
+            'Paid via UPI to **`mexxz@slc`** for VIP, Supreme VIP, or Crate Keys?\n\n' +
+            'Click an option below to submit your **12-digit UPI UTR / Transaction ID** and **Minecraft IGN**.\n\n' +
+            '⚡ **Instant Automated Verification:**\n' +
+            '• Sent immediately to Owner MEXXZ in `#🔒┃staff-logs`.\n' +
+            '• Upon 1-click approval, your in-game rank, crate keys, and Discord role will activate automatically!'
+          )
+          .setColor(0x00FF88)
+          .setFooter({ text: 'MEXVERSE SMP • Zero Manual Wait' });
+
+        return interaction.reply({ embeds: [embed], components: [row] });
+      }
+
+      // ==========================================
+      // 🏛️ /give-coins (ADMIN / OWNER TREASURY GRANT)
+      // ==========================================
+      if (commandName === 'give-coins') {
+        const isOwner = interaction.user.id === '1551635947660247160';
+        const hasAdmin = interaction.memberPermissions && interaction.memberPermissions.has(PermissionFlagsBits.Administrator);
+        const hasHeadMod = interaction.member && interaction.member.roles.cache.some(r => r.name.toLowerCase().includes('head mod'));
+
+        if (!isOwner && !hasAdmin && !hasHeadMod) {
+          return interaction.reply({
+            content: '⛔ Only Server Owner, Administrators, and Head Moderators can grant MexCoins from the realm treasury!',
+            flags: 64
+          });
+        }
+
+        const targetUser = options.getUser('user');
+        const amount = options.getInteger('amount');
+        const reason = options.getString('reason') || 'Official SMP Treasury Grant';
+
+        const targetEco = db.getEconomy(targetUser.id);
+        targetEco.coins += amount;
+        db.saveEconomy();
+
+        const embed = new EmbedBuilder()
+          .setTitle('🏛️ REALM TREASURY — COINS GRANTED')
+          .setColor(0xFBBF24)
+          .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+          .setDescription(`Administrator **${interaction.user.tag}** has minted and granted MexCoins directly to a member!`)
+          .addFields(
+            { name: '🎯 Recipient', value: `<@${targetUser.id}> (\`${targetUser.tag}\`)`, inline: true },
+            { name: '💰 Coins Added', value: `\`+${amount.toLocaleString()} MexCoins\``, inline: true },
+            { name: '💳 New Balance', value: `\`${targetEco.coins.toLocaleString()} MexCoins\``, inline: true },
+            { name: '📝 Reason', value: `*${reason}*` }
+          )
+          .setFooter({ text: `Authorized by ${interaction.user.username}`, iconURL: interaction.user.displayAvatarURL() })
+          .setTimestamp();
+
+        await interaction.reply({ embeds: [embed] });
+
+        // Log to #🔒┃staff-logs
+        const staffLogs = interaction.guild.channels.cache.find(c => c.name.includes('staff-logs'));
+        if (staffLogs) {
+          await staffLogs.send({ embeds: [embed] }).catch(() => {});
+        }
+        return;
+      }
+
+      // ==========================================
+      // 💸 /pay (PEER-TO-PEER COIN TRANSFER)
+      // ==========================================
+      if (commandName === 'pay') {
+        const targetUser = options.getUser('user');
+        const amount = options.getInteger('amount');
+
+        if (targetUser.id === interaction.user.id) {
+          return interaction.reply({ content: '❌ You cannot transfer MexCoins to yourself!', flags: 64 });
+        }
+        if (targetUser.bot) {
+          return interaction.reply({ content: '❌ You cannot send MexCoins to a bot!', flags: 64 });
+        }
+
+        const senderEco = db.getEconomy(interaction.user.id);
+        if (senderEco.coins < amount) {
+          return interaction.reply({
+            content: `❌ Insufficient funds! You have \`${senderEco.coins.toLocaleString()}\` MexCoins, but tried to send \`${amount.toLocaleString()}\`.`,
+            flags: 64
+          });
+        }
+
+        const targetEco = db.getEconomy(targetUser.id);
+        senderEco.coins -= amount;
+        targetEco.coins += amount;
+        db.saveEconomy();
+
+        const embed = new EmbedBuilder()
+          .setTitle('💸 MexCoins Transfer Successful!')
+          .setDescription(
+            `**Transfer Details:**\n` +
+            `• **Sender:** <@${interaction.user.id}>\n` +
+            `• **Recipient:** <@${targetUser.id}>\n` +
+            `• **Amount Sent:** \`${amount.toLocaleString()} MexCoins\`\n\n` +
+            `💳 **Your New Balance:** \`${senderEco.coins.toLocaleString()} MexCoins\``
+          )
+          .setColor(0x10B981)
+          .setThumbnail('https://mc-heads.net/head/MHF_Chest')
+          .setFooter({ text: 'MEXVERSE SMP Economy • Instant & 0% Fee' })
           .setTimestamp();
 
         return interaction.reply({ embeds: [embed] });
